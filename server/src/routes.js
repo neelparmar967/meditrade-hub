@@ -3,7 +3,7 @@ import multer from 'multer';
 import XLSX from 'xlsx';
 import { body, validationResult } from 'express-validator';
 import { comparePassword, findUserByEmail, hashPassword, permit, requireAuth, signToken } from './auth.js';
-import { orderStatuses, roles } from './config.js';
+import { config, orderStatuses, roles } from './config.js';
 import { dbState, memoryStore } from './store.js';
 import { models } from './models.js';
 import { enrichProduct, groupCartByDistributor, isOfferActive, makePurchaseOrderPdf } from './utils.js';
@@ -205,8 +205,165 @@ const adjustStock = async (productId, delta, data) => {
   return updated;
 };
 
+const demoPassword = 'Password@123';
+
+const ensureUser = async ({ name, email, role, phone }) => {
+  const existing = await findUserByEmail(email);
+  if (existing) return existing;
+  const payload = {
+    name,
+    email: email.toLowerCase(),
+    passwordHash: await hashPassword(demoPassword),
+    role,
+    phone,
+    status: 'active'
+  };
+  return dbState.connected ? asPlain(await models.User.create(payload)) : memoryStore.create('users', payload);
+};
+
+const ensureBy = async (collection, Model, predicate, payload) => {
+  if (dbState.connected) {
+    const existing = await Model.findOne(predicate).lean();
+    if (existing) return existing;
+    return asPlain(await Model.create(payload));
+  }
+  const existing = memoryStore.findOne(collection, (item) =>
+    Object.entries(predicate).every(([key, value]) => String(item[key]) === String(value))
+  );
+  return existing || memoryStore.create(collection, payload);
+};
+
+const seedDemoData = async () => {
+  const admin = await ensureUser({ name: 'Naina Rao', email: 'admin@meditradehub.test', role: 'SUPER_ADMIN', phone: '9000000001' });
+  const retailerUser = await ensureUser({ name: 'Aarav Medical Store', email: 'retailer@meditradehub.test', role: 'RETAILER', phone: '9000000002' });
+  const northlineUser = await ensureUser({ name: 'Northline Stockists', email: 'distributor@meditradehub.test', role: 'DISTRIBUTOR', phone: '9000000003' });
+  const zenithUser = await ensureUser({ name: 'Zenith Pharma Supply', email: 'branch@meditradehub.test', role: 'BRANCH_MANAGER', phone: '9000000006' });
+  const companyUser = await ensureUser({ name: 'Vanta Life Sciences', email: 'company@meditradehub.test', role: 'COMPANY_ADMIN', phone: '9000000005' });
+
+  const retailer = await ensureBy('retailers', models.Retailer, { userId: retailerUser.id || retailerUser._id }, {
+    userId: retailerUser.id || retailerUser._id,
+    shopName: 'Aarav Medical Store',
+    gstNumber: '27AARCM1234L1Z2',
+    drugLicenseNumber: 'DL-MH-77421',
+    address: '12 Care Street, Pune',
+    preferredDistributorIds: []
+  });
+
+  const northline = await ensureBy('distributors', models.Distributor, { userId: northlineUser.id || northlineUser._id }, {
+    userId: northlineUser.id || northlineUser._id,
+    name: 'Northline Stockists',
+    region: 'West Zone',
+    gstNumber: '27NORST4421P1ZA',
+    address: 'Warehouse 4, Pune',
+    serviceAreas: ['Pune', 'Mumbai'],
+    rating: 0
+  });
+
+  const zenith = await ensureBy('distributors', models.Distributor, { userId: zenithUser.id || zenithUser._id }, {
+    userId: zenithUser.id || zenithUser._id,
+    name: 'Zenith Pharma Supply',
+    region: 'South Zone',
+    gstNumber: '29ZENIT7781B1Z9',
+    address: 'Market Yard, Bengaluru',
+    serviceAreas: ['Bengaluru', 'Mysuru'],
+    rating: 0
+  });
+
+  const vanta = await ensureBy('companies', models.Company, { name: 'Vanta Life Sciences' }, {
+    userId: companyUser.id || companyUser._id,
+    name: 'Vanta Life Sciences',
+    description: 'Quality generics and chronic-care portfolio.',
+    supportEmail: 'care@vantalife.test'
+  });
+
+  const nova = await ensureBy('companies', models.Company, { name: 'NovaCure Remedies' }, {
+    name: 'NovaCure Remedies',
+    description: 'Acute-care tablets, syrups, and wellness range.',
+    supportEmail: 'partners@novacure.test'
+  });
+
+  const distributorIds = {
+    northline: northline.id || northline._id,
+    zenith: zenith.id || zenith._id
+  };
+  const companyIds = {
+    vanta: vanta.id || vanta._id,
+    nova: nova.id || nova._id
+  };
+
+  const productRows = [
+    ['Glycora-M 500 Tablet', 'Metformin 500mg', 'Diabetes', '10x10 tablets', 118, 86, 340, companyIds.vanta, distributorIds.northline],
+    ['Cardiovex 5 Tablet', 'Amlodipine 5mg', 'Cardiac', '20x15 tablets', 92, 63, 180, companyIds.vanta, distributorIds.northline],
+    ['Respira-LC Syrup', 'Levocetirizine + Montelukast', 'Respiratory', '100ml bottle', 132, 96, 58, companyIds.nova, distributorIds.zenith],
+    ['Neurocal D3 Sachet', 'Vitamin D3 60000 IU', 'Supplements', '1x4 sachets', 144, 101, 0, companyIds.nova, distributorIds.northline],
+    ['AcetaPlus 650 Tablet', 'Paracetamol 650mg', 'Pain relief', '15x10 tablets', 34, 22, 720, companyIds.nova, distributorIds.zenith],
+    ['ParaRelief 500 Tablet', 'Paracetamol 500mg', 'Pain relief', '20x10 tablets', 28, 19, 460, companyIds.vanta, distributorIds.northline],
+    ['ParaRelief 650 Tablet', 'Paracetamol 650mg', 'Pain relief', '15x10 tablets', 36, 24, 42, companyIds.vanta, distributorIds.northline]
+  ];
+
+  const products = [];
+  for (const [name, composition, category, packSize, mrp, ptr, stock, companyId, distributorId] of productRows) {
+    products.push(await ensureBy('products', models.Product, { name, distributorId }, {
+      name,
+      composition,
+      category,
+      packSize,
+      mrp,
+      ptr,
+      stock,
+      stockStatus: stockStatusFor(stock),
+      companyId,
+      distributorId,
+      image: '/placeholder-medicine.svg'
+    }));
+  }
+
+  const schemes = [];
+  schemes.push(await ensureBy('schemes', models.Scheme, { title: 'Northline Starter Offer', distributorId: distributorIds.northline }, {
+    title: 'Northline Starter Offer',
+    description: 'Rs. 500 off on Northline orders of Rs. 1,000 or more.',
+    banner: 'Rs. 500 off',
+    companyId: companyIds.vanta,
+    distributorId: distributorIds.northline,
+    validUntil: '2026-09-30',
+    category: 'All',
+    minOrderAmount: 1000,
+    discountAmount: 500,
+    usedBy: []
+  }));
+  schemes.push(await ensureBy('schemes', models.Scheme, { title: 'Zenith Basket Offer', distributorId: distributorIds.zenith }, {
+    title: 'Zenith Basket Offer',
+    description: 'Rs. 500 off on Zenith orders of Rs. 1,000 or more.',
+    banner: 'Rs. 500 off',
+    companyId: companyIds.nova,
+    distributorId: distributorIds.zenith,
+    validUntil: '2026-08-15',
+    category: 'All',
+    minOrderAmount: 1000,
+    discountAmount: 500,
+    usedBy: []
+  }));
+
+  return {
+    users: [admin, retailerUser, northlineUser, zenithUser, companyUser].length,
+    retailer: retailer.shopName || retailer.name,
+    distributors: [northline.name, zenith.name],
+    companies: [vanta.name, nova.name],
+    products: products.length,
+    schemes: schemes.length,
+    demoPassword
+  };
+};
+
 router.get('/health', async (_req, res) => {
   res.json({ ok: true, database: dbState.mode, app: 'MediTrade Hub', lowStockLimit: LOW_STOCK_LIMIT });
+});
+
+router.get('/admin/seed-demo', async (req, res) => {
+  if (!config.seedSecret) return res.status(403).json({ message: 'SEED_SECRET is not configured' });
+  if (req.query.secret !== config.seedSecret) return res.status(403).json({ message: 'Invalid seed secret' });
+  const result = await seedDemoData();
+  res.json({ message: 'Demo data is ready. Existing data was not deleted.', result });
 });
 
 router.post('/auth/login', [body('email').isEmail(), body('password').isLength({ min: 6 })], validate, async (req, res) => {

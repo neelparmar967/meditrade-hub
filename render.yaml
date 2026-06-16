@@ -13,6 +13,8 @@ services:
         generateValue: true
       - key: MONGO_URI
         sync: false
+      - key: SEED_SECRET
+        sync: false
       - key: CLIENT_ORIGIN
         value: https://meditrade-hub-web.onrender.com
 
